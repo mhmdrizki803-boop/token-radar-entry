@@ -64,16 +64,30 @@
 
   /* ── the model, restated so the page can check board.json ────────────── */
 
+  /*
+    The fitted power law, in the same order of operations as lib/model.ts:
+      fit      = scale x TVL^elasticity
+      category = the fitted multiplier for the row's category (1 when the fit never saw it)
+      seasoning= seasoning_floor + min(age, seasoning_days) / seasoning_days x seasoning_range
+      momentum = 1 + clamp(change_7d, momentum_floor, momentum_cap) / 100 x momentum_weight
+    Every constant comes out of radar.model, so this is the model the board was scored with and not a
+    restatement of it: if the two ever disagree the drawer says so.
+  */
   function reprice(row) {
+    const tvl = isNumber(row.tvl_usd) && row.tvl_usd > 0 ? row.tvl_usd : 1;
+    const fit = model.scale * Math.pow(tvl, model.elasticity);
+
     const rawGrowth = isNumber(row.change_7d) ? row.change_7d : 0;
-    const growth = Math.min(model.growth_cap, Math.max(model.growth_floor, rawGrowth));
-    const growthStep = 1 + (growth / 100) * model.growth_weight;
+    const growth = Math.min(model.momentum_cap, Math.max(model.momentum_floor, rawGrowth));
+    const growthStep = 1 + (growth / 100) * model.momentum_weight;
 
     const age = isNumber(row.age_days) ? row.age_days : model.unknown_age_days;
-    const held = Math.min(Math.max(age, 0), model.maturity_days);
-    const maturityStep = model.maturity_floor + (held / model.maturity_days) * model.maturity_range;
+    const held = Math.min(Math.max(age, 0), model.seasoning_days);
+    const seasoning = model.seasoning_floor + (held / model.seasoning_days) * model.seasoning_range;
 
-    return Math.max(1, Math.round(row.tvl_usd * model.base_multiple * growthStep * maturityStep));
+    const category = isNumber(row.category_multiplier) ? row.category_multiplier : 1;
+
+    return Math.max(1, Math.round(fit * category * seasoning * growthStep));
   }
 
   /* ── the farm plan, derived the same way for every row ───────────────── */
@@ -456,15 +470,17 @@
 
   function modelPanel() {
     const m = model;
-    const formula = 'implied = round( tvl_usd x ' + m.base_multiple
-      + ' x (1 + clamp(change_7d, ' + m.growth_floor + ', ' + m.growth_cap + ') / 100 x ' + m.growth_weight + ')'
-      + ' x (' + m.maturity_floor + ' + min(age_days, ' + m.maturity_days + ') / ' + m.maturity_days + ' x ' + m.maturity_range + ') )';
+    const fitted = Object.keys(m.category_factors || {}).map(function (name) {
+      return name + ' x' + m.category_factors[name];
+    });
 
     return node('section', { class: 'panel model' },
       node('h2', { text: 'How implied value is computed' }),
-      node('p', { class: 'sub', text: 'Every row is scored by one function of the snapshot figures. No protocol name is special-cased, and no row is hand-picked.' }),
-      node('div', { class: 'formula', text: formula }),
-      node('p', { class: 'sub', text: 'TVL and seven-day growth come from the snapshot. Age is the time since the protocol was first listed, the best record of how long it has run with no token; an unlisted age uses ' + m.unknown_age_days + ' days. The early radar is every pre-token protocol below the watchlist floor, by TVL, and the live-token protocols are set aside with their market caps shown.' }));
+      node('p', { class: 'sub', text: 'The value is a power law fitted on the ' + m.comparables + ' protocols in this snapshot that already carry both a TVL and a market cap, by least squares in log-log space. Elasticity ' + m.elasticity + ' means a 1% rise in TVL is worth about ' + m.elasticity + '% of market cap: the market is sublinear in TVL, which is what a market that also prices users, narrative and float looks like. ' + m.comparables_excluded + ' protocols carry both figures and are set aside, because their TVL is somebody else\'s asset parked in a wrapper: exchanges, bridges and liquid-staking and restaking receipts.' }),
+      node('div', { class: 'formula', text: radar.formula }),
+      node('p', { class: 'sub', text: 'How well it fits, stated plainly: TVL explains ' + Math.round(m.r_squared * 100) + '% of the spread of market cap in log space (R-squared), the standard deviation of the log residual is ' + m.residual_sigma + ' (a typical miss of a factor of ' + Math.exp(m.residual_sigma).toFixed(1) + '), and ' + Math.round(m.within_factor_3 * 100) + '% of the comparables land within a factor of 3 of the curve. A weak fit is the honest result: TVL is real and it is not the whole business.' }),
+      node('p', { class: 'sub', text: 'Category is fitted, not picked: each multiplier is the median residual of that category\'s comparables, shrunk toward 1 by a ' + m.category_prior + '-comparables prior and clamped to ' + m.category_floor + ' to ' + m.category_cap + ', so one lucky protocol cannot own a category. ' + (fitted.length ? fitted.join(', ') + '.' : '') }),
+      node('p', { class: 'sub', text: 'Seasoning runs ' + m.seasoning_floor + ' to ' + (m.seasoning_floor + m.seasoning_range) + ' across ' + m.seasoning_days + ' days with no token, because a protocol that has held TVL for years has shown it can hold TVL; an unlisted age uses ' + m.unknown_age_days + ' days. Momentum is ' + m.momentum_weight + ' of the seven-day change, pinned inside ' + m.momentum_floor + ' to ' + m.momentum_cap + ' per cent, so one week moves a value by at most about ' + Math.round(Math.abs(m.momentum_weight * (m.momentum_cap > 0 ? m.momentum_cap : m.momentum_floor))) + '%: a week is weak evidence and the comparables\' residuals barely correlate with it. The early radar is every pre-token protocol below the watchlist floor, by TVL, and the live-token protocols are set aside with their market caps shown.' }));
   }
 
   /* ── the drawer ──────────────────────────────────────────────────────── */
@@ -515,8 +531,10 @@
         equationLine('TVL', money(row.tvl_usd)),
         equationLine('Seven-day growth', percent(row.change_7d)),
         equationLine('Age with no token', ageText(row.age_days)),
-        equationLine('Growth multiplier', String(row.growth_multiplier)),
-        equationLine('Maturity multiplier', String(row.maturity_multiplier)),
+        equationLine('Category multiplier', String(row.category_multiplier)),
+        equationLine('Seasoning multiplier', String(row.maturity_multiplier)),
+        equationLine('Momentum multiplier', String(row.growth_multiplier)),
+        equationLine('On the fitted curve', money(row.fit_value_usd)),
         equationLine('Implied value', money(row.implied_value_usd))),
       node('p', {
         class: 'sub',
