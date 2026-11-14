@@ -204,6 +204,8 @@ export interface RadarData {
   live_size: number;
   rows: RadarRow[];
   live: LiveRow[];
+  /** TVL and market cap of every comparable the curve was fitted on, for the page's log-log chart. */
+  comparables_points: { tvl_usd: number; mcap_usd: number }[];
 }
 
 /** The headline figures main.ts prints and the page shows above the table. */
@@ -827,6 +829,10 @@ export function buildRadar(snapshot: Snapshot, model?: ModelConstants): { board:
     live_size: live.length,
     rows: board.map(radarRow),
     live,
+    comparables_points: comparables(snapshot).map((p) => ({
+      tvl_usd: p.tvl_usd,
+      mcap_usd: p.mcap_usd as number,
+    })),
   };
   return { board, radar };
 }

@@ -5,8 +5,9 @@
   builds the whole board from it: a masthead carrying the snapshot date and the model
   version, the summary counts that say how many protocols were scored and how many were set
   aside, a search box and a category filter over the rows, a sortable table of the ranked
-  pre-token protocols, a second table for the protocols that already trade, a short
-  statement of the pricing model, and a side drawer that opens on any row to show how that
+  pre-token protocols, a second table for the protocols that already trade, a canvas chart of the
+  fitted power law against every comparable, a short statement of the pricing model,
+  and a side drawer that opens on any row to show how that
   row was priced together with a plain farm plan for it.
 
   The only arithmetic performed here is the model itself, recomputed from the row's own
@@ -466,6 +467,296 @@
           node('tbody', null, radar.live.map(liveRow)))));
   }
 
+
+  /* ── the fitted curve, drawn so a reader can see the fit rather than take it on trust ── */
+
+  /*
+    A log-log scatter of every comparable the snapshot priced (TVL on x, market cap on y),
+    the fitted line from this board's own intercept and elasticity, and a band a factor of 3
+    either side of that line. No chart library: the dots, the line and the axes are stroked
+    onto a <canvas> by hand. Missing data, a missing canvas, or a throw all draw nothing, so
+    a bad drawing surface cannot take the table down with it.
+  */
+
+  function log10(value) {
+    return Math.log(value) / Math.LN10;
+  }
+
+  function comparablePoints() {
+    const points = [];
+    function add(tvl, mcap) {
+      if (!isNumber(tvl) || tvl <= 0 || !isNumber(mcap) || mcap <= 0) return;
+      points.push({ x: log10(tvl), y: log10(mcap) });
+    }
+    const packed = radar.comparables_points;
+    if (Array.isArray(packed) && packed.length) {
+      packed.forEach(function (row) {
+        if (row && typeof row === 'object') add(row.tvl_usd, row.mcap_usd);
+      });
+      return points;
+    }
+    (radar.live || []).forEach(function (row) { add(row.tvl_usd, row.mcap_usd); });
+    (radar.rows || []).forEach(function (row) { add(row.tvl_usd, row.mcap_usd); });
+    return points;
+  }
+
+  function lineLog10(logTvl) {
+    return model.intercept_log10 + model.elasticity * logTvl;
+  }
+
+  function axisMoney(logValue) {
+    const value = Math.pow(10, logValue);
+    if (!isFinite(value) || value <= 0) return '';
+    if (value >= 1e12) return '$' + Math.round(value / 1e12) + 'T';
+    if (value >= 1e9) return '$' + Math.round(value / 1e9) + 'B';
+    if (value >= 1e6) return '$' + Math.round(value / 1e6) + 'M';
+    if (value >= 1e3) return '$' + Math.round(value / 1e3) + 'K';
+    return '$' + Math.round(value);
+  }
+
+  function logTicks(min, max) {
+    const ticks = [];
+    if (!(isNumber(min) && isNumber(max))) return ticks;
+    if (max < min) { const swap = min; min = max; max = swap; }
+    const start = Math.floor(min);
+    const end = Math.ceil(max);
+    for (let n = start; n <= end; n++) {
+      if (n >= min - 1e-9 && n <= max + 1e-9) ticks.push(n);
+    }
+    if (ticks.length === 0) ticks.push(Math.round((min + max) / 2));
+    return ticks;
+  }
+
+  function padDomain(min, max) {
+    if (!(isNumber(min) && isNumber(max))) return [0, 1];
+    if (min === max) return [min - 0.5, max + 0.5];
+    const span = max - min;
+    return [min - span * 0.08, max + span * 0.08];
+  }
+
+  function readColour(name, fallback) {
+    try {
+      const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+      return value || fallback;
+    } catch (err) {
+      return fallback;
+    }
+  }
+
+  function drawFitChart(canvas) {
+    try {
+    if (!canvas || typeof canvas.getContext !== 'function') return false;
+    if (!model || !isNumber(model.intercept_log10) || !isNumber(model.elasticity)) return false;
+
+    const points = comparablePoints();
+    if (!points.length) return false;
+
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return false;
+
+    const cssWidth = Math.max(280, Math.round(
+      canvas.clientWidth
+      || (canvas.parentElement && canvas.parentElement.clientWidth)
+      || 840
+    ));
+    const cssHeight = Math.max(220, Math.round(canvas.clientHeight || 360));
+    const dpr = Math.min(2, (typeof window !== 'undefined' && window.devicePixelRatio) || 1);
+    canvas.width = Math.round(cssWidth * dpr);
+    canvas.height = Math.round(cssHeight * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, cssWidth, cssHeight);
+
+    const margin = { top: 58, right: 18, bottom: 48, left: 62 };
+    const plotW = cssWidth - margin.left - margin.right;
+    const plotH = cssHeight - margin.top - margin.bottom;
+    if (plotW < 80 || plotH < 80) return false;
+
+    let xMin = points[0].x;
+    let xMax = points[0].x;
+    let yMin = points[0].y;
+    let yMax = points[0].y;
+    points.forEach(function (p) {
+      if (p.x < xMin) xMin = p.x;
+      if (p.x > xMax) xMax = p.x;
+      if (p.y < yMin) yMin = p.y;
+      if (p.y > yMax) yMax = p.y;
+    });
+
+    const band = log10(3);
+    const yLineLo = Math.min(lineLog10(xMin), lineLog10(xMax));
+    const yLineHi = Math.max(lineLog10(xMin), lineLog10(xMax));
+    yMin = Math.min(yMin, yLineLo - band);
+    yMax = Math.max(yMax, yLineHi + band);
+
+    const xPad = padDomain(xMin, xMax);
+    const yPad = padDomain(yMin, yMax);
+    xMin = xPad[0];
+    xMax = xPad[1];
+    yMin = yPad[0];
+    yMax = yPad[1];
+    if (xMax === xMin) xMax = xMin + 1;
+    if (yMax === yMin) yMax = yMin + 1;
+
+    function xOf(logTvl) {
+      return margin.left + ((logTvl - xMin) / (xMax - xMin)) * plotW;
+    }
+    function yOf(logVal) {
+      return margin.top + plotH - ((logVal - yMin) / (yMax - yMin)) * plotH;
+    }
+
+    const ink = readColour('--ink', '#16211c');
+    const muted = readColour('--muted', '#5f6f67');
+    const border = readColour('--border', '#d8e2dc');
+    const accent = readColour('--accent', '#0f7a5a');
+    const canvasBg = readColour('--canvas', '#f2f5f3');
+    const surface = readColour('--surface', '#ffffff');
+
+    ctx.fillStyle = surface;
+    ctx.fillRect(0, 0, cssWidth, cssHeight);
+
+    ctx.fillStyle = canvasBg;
+    ctx.fillRect(margin.left, margin.top, plotW, plotH);
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(margin.left, margin.top, plotW, plotH);
+    ctx.clip();
+
+    const steps = 48;
+    ctx.beginPath();
+    for (let i = 0; i <= steps; i++) {
+      const x = xMin + (i / steps) * (xMax - xMin);
+      const y = yOf(lineLog10(x) + band);
+      if (i === 0) ctx.moveTo(xOf(x), y);
+      else ctx.lineTo(xOf(x), y);
+    }
+    for (let i = steps; i >= 0; i--) {
+      const x = xMin + (i / steps) * (xMax - xMin);
+      ctx.lineTo(xOf(x), yOf(lineLog10(x) - band));
+    }
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(15, 122, 90, 0.14)';
+    ctx.fill();
+
+    ctx.beginPath();
+    for (let i = 0; i <= steps; i++) {
+      const x = xMin + (i / steps) * (xMax - xMin);
+      const y = yOf(lineLog10(x));
+      if (i === 0) ctx.moveTo(xOf(x), y);
+      else ctx.lineTo(xOf(x), y);
+    }
+    ctx.strokeStyle = accent;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    let inside = 0;
+    points.forEach(function (p) {
+      if (Math.abs(p.y - lineLog10(p.x)) <= band) inside += 1;
+      ctx.beginPath();
+      ctx.arc(xOf(p.x), yOf(p.y), 3.1, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(22, 33, 28, 0.55)';
+      ctx.fill();
+    });
+    ctx.restore();
+
+    ctx.strokeStyle = border;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(margin.left + 0.5, margin.top + 0.5, plotW - 1, plotH - 1);
+
+    ctx.fillStyle = muted;
+    ctx.font = '11px ui-monospace, "SF Mono", Menlo, monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    logTicks(xMin, xMax).forEach(function (tick) {
+      const x = xOf(tick);
+      if (x < margin.left - 2 || x > margin.left + plotW + 2) return;
+      ctx.strokeStyle = 'rgba(216, 226, 220, 0.9)';
+      ctx.beginPath();
+      ctx.moveTo(x, margin.top);
+      ctx.lineTo(x, margin.top + plotH);
+      ctx.stroke();
+      ctx.fillStyle = muted;
+      ctx.fillText(axisMoney(tick), x, margin.top + plotH + 8);
+    });
+
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'middle';
+    logTicks(yMin, yMax).forEach(function (tick) {
+      const y = yOf(tick);
+      if (y < margin.top - 2 || y > margin.top + plotH + 2) return;
+      ctx.strokeStyle = 'rgba(216, 226, 220, 0.9)';
+      ctx.beginPath();
+      ctx.moveTo(margin.left, y);
+      ctx.lineTo(margin.left + plotW, y);
+      ctx.stroke();
+      ctx.fillStyle = muted;
+      ctx.fillText(axisMoney(tick), margin.left - 8, y);
+    });
+
+    ctx.fillStyle = ink;
+    ctx.font = '600 14px system-ui, -apple-system, "Segoe UI", sans-serif';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'alphabetic';
+    ctx.fillText('How a launch is priced', margin.left, 22);
+
+    const formula = 'value = 10^' + model.intercept_log10 + ' x TVL^' + model.elasticity;
+    ctx.fillStyle = muted;
+    ctx.font = '12px ui-monospace, "SF Mono", Menlo, monospace';
+    ctx.fillText(formula, margin.left, 40);
+
+    ctx.fillStyle = muted;
+    ctx.font = '11px system-ui, -apple-system, "Segoe UI", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'alphabetic';
+    ctx.fillText('TVL (log10 scale)', margin.left + plotW / 2, cssHeight - 8);
+
+    ctx.save();
+    ctx.translate(14, margin.top + plotH / 2);
+    ctx.rotate(-Math.PI / 2);
+    ctx.fillText('Market cap (log10 scale)', 0, 0);
+    ctx.restore();
+
+    const share = inside / points.length;
+    const note = points.length + ' comparables  ·  ' + Math.round(share * 100) + '% land inside the x3 band';
+    ctx.fillStyle = muted;
+    ctx.font = '11px system-ui, -apple-system, "Segoe UI", sans-serif';
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'alphabetic';
+    ctx.fillText(note, margin.left + plotW, 40);
+
+    ctx.textAlign = 'right';
+    ctx.fillStyle = accent;
+    ctx.font = '11px system-ui, -apple-system, "Segoe UI", sans-serif';
+    ctx.fillText('fitted curve  ± factor of 3', margin.left + plotW, 22);
+
+    return true;
+    } catch (err) {
+      return false;
+    }
+  }
+
+  function chartCard() {
+    try {
+      if (!model || !isNumber(model.intercept_log10) || !isNumber(model.elasticity)) return null;
+      if (!comparablePoints().length) return null;
+      const canvas = node('canvas', {
+        class: 'fit-chart',
+        role: 'img',
+        'aria-label': 'Log-log scatter of already-priced protocols with the fitted power-law curve and a factor-of-3 band'
+      });
+      return node('div', { class: 'chart-card' }, canvas);
+    } catch (err) {
+      return null;
+    }
+  }
+
+  function paintChart(card) {
+    if (!card) return;
+    const canvas = card.querySelector && card.querySelector('canvas');
+    if (!canvas) return;
+    try { drawFitChart(canvas); } catch (err) {}
+  }
+
   /* ── the statement of the model ──────────────────────────────────────── */
 
   function modelPanel() {
@@ -606,7 +897,14 @@
     resultsHost.appendChild(view.tab === 'pre-token' ? boardPanel() : livePanel());
 
     modelHost.textContent = '';
-    if (view.tab === 'pre-token') modelHost.appendChild(modelPanel());
+    if (view.tab === 'pre-token') {
+      const chart = chartCard();
+      if (chart) {
+        modelHost.appendChild(chart);
+        paintChart(chart);
+      }
+      modelHost.appendChild(modelPanel());
+    }
 
     countLabel.textContent = view.tab === 'pre-token'
       ? matching().length + ' rows shown'
@@ -627,5 +925,12 @@
 
   window.addEventListener('keydown', function (event) {
     if (event.key === 'Escape' && drawer.open) drawer.close();
+  });
+
+  window.addEventListener('resize', function () {
+    try {
+      const card = modelHost.querySelector && modelHost.querySelector('.chart-card');
+      if (card) paintChart(card);
+    } catch (err) {}
   });
 })();
