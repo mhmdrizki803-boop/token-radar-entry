@@ -90,3 +90,4 @@ process.stdout.write(
     `token radar: wrote ${join(out, 'board.json')}, ${join(out, 'data.js')}, ${join(out, 'dashboard')} (3 files), ${join(out, 'screenshots')} (${shots.length} images) and ${join(out, 'dossier.json')}\n`,
 );
 // Snapshot rerun verified here.
+// This program claims to turn a sealed protocol snapshot into a ranked token-radar submission.
